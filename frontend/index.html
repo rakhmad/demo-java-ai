@@ -41,6 +41,12 @@
   textarea { flex: 1; min-height: 64px; max-height: 40vh; padding: 10px 12px; resize: vertical; }
   button { padding: 0 20px; background: var(--accent); color: var(--accent-text); border: none; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .5; cursor: wait; }
+  .stats { margin: 8px 0 0; padding-top: 8px; border-top: 1px dashed var(--border); font-size: .8rem; color: var(--muted);
+           display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+  .msg.error .stats { border-color: currentColor; color: inherit; opacity: .85; }
+  .stats code { font-size: .8rem; }
+  .stats button { padding: 1px 8px; font-size: .75rem; font-weight: 500; background: transparent; color: inherit; border: 1px solid currentColor; }
+  .placeholder { font-style: italic; color: var(--muted); }
   #hint { max-width: 860px; margin: 6px auto 0; font-size: .8rem; color: var(--error); min-height: 1.2em; }
 </style>
 </head>
@@ -120,9 +126,12 @@ function checkQuestion(q) {
 
 // ---- rendering: markdown + highlighted Java + Mermaid + sanitized SVG ----
 const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let streaming = false; // while tokens arrive, illustrations are shown as placeholders (they may be incomplete)
 const renderer = new marked.Renderer();
 renderer.code = (code, lang = "") => {
   lang = (lang || "").trim().toLowerCase();
+  if ((lang === "mermaid" || lang === "svg") && streaming)
+    return `<div class="figure placeholder">Illustration renders when the answer is complete...</div>`;
   if (lang === "mermaid") return `<div class="figure"><pre class="mermaid">${escapeHtml(code)}</pre></div>`;
   if (lang === "svg") return `<div class="figure">${code}</div>`; // sanitized below with the rest of the HTML
   const language = hljs.getLanguage(lang) ? lang : "plaintext";
@@ -130,14 +139,52 @@ renderer.code = (code, lang = "") => {
 };
 marked.use({ renderer, gfm: true });
 
-async function renderAnswer(el, markdown) {
+async function renderAnswer(el, markdown, final) {
+  streaming = !final;
   // Model output is untrusted: strip scripts, event handlers and foreignObject from HTML and SVG alike.
   el.innerHTML = DOMPurify.sanitize(marked.parse(markdown), {
     USE_PROFILES: { html: true, svg: true, svgFilters: true }, FORBID_TAGS: ["foreignObject", "style"] });
+  if (!final) return;
   const diagrams = el.querySelectorAll("pre.mermaid");
   try { if (diagrams.length) await mermaid.run({ nodes: diagrams }); }
   catch { diagrams.forEach(d => { if (!d.querySelector("svg")) d.outerHTML =
     `<pre><code class="hljs">${escapeHtml(d.textContent)}</code></pre>`; }); } // show source if the diagram is invalid
+}
+
+// ---- streaming: POST + Server-Sent Events (EventSource cannot POST) ----
+async function* sseEvents(response) {
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buffer += value.replace(/\r/g, "");
+    let end;
+    while ((end = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      let name = "message", data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) name = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (data) yield { name, data: JSON.parse(data) };
+    }
+  }
+}
+
+// ---- traceability: the browser starts the W3C trace, both backends continue it ----
+const randomHex = (bytes) => [...crypto.getRandomValues(new Uint8Array(bytes))].map(b => b.toString(16).padStart(2, "0")).join("");
+const seconds = (ms) => ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+
+function statsLine(el, parts, traceId) {
+  el.replaceChildren(...parts.map(text => Object.assign(document.createElement("span"), { textContent: text })));
+  const trace = document.createElement("span");
+  trace.innerHTML = `Trace <code title="${traceId}">${traceId.slice(0, 12)}...</code> `;
+  const copy = Object.assign(document.createElement("button"), { type: "button", textContent: "Copy" });
+  copy.onclick = () => navigator.clipboard?.writeText(traceId).then(() => { copy.textContent = "Copied"; });
+  trace.append(copy);
+  el.append(trace);
 }
 
 function addMessage(cls, text) {
@@ -163,18 +210,56 @@ $("ask").addEventListener("submit", async (e) => {
   addMessage("user", question);
   $("question").value = "";
   $("send").disabled = true;
-  const reply = addMessage("pending", "Thinking...");
+
+  const traceId = randomHex(16);
+  const started = performance.now();
+  const reply = addMessage("pending", "");
+  const body = reply.appendChild(document.createElement("div"));
+  const stats = reply.appendChild(Object.assign(document.createElement("div"), { className: "stats" }));
+  body.textContent = "Thinking...";
+  const ticker = setInterval(() => statsLine(stats, [`Waiting ${seconds(performance.now() - started)}`], traceId), 100);
+
+  let markdown = "", firstTokenAt = 0, done = null, error = null, frame = 0;
+  const fail = (message) => { error = message; };
   try {
     const res = await fetch(`${$("backend").value}/api/ask`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) { reply.className = "msg error"; reply.textContent = data.error || `Request failed (HTTP ${res.status}).`; return; }
-    reply.className = "msg";
-    await renderAnswer(reply, data.answer);
+      method: "POST",
+      headers: { "Content-Type": "application/json", traceparent: `00-${traceId}-${randomHex(8)}-01` },
+      body: JSON.stringify({ question }) });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      fail(data.error || `Request failed (HTTP ${res.status}).`);
+    } else {
+      for await (const ev of sseEvents(res)) {
+        if (ev.name === "token") {
+          if (!firstTokenAt) { firstTokenAt = performance.now(); reply.className = "msg"; }
+          markdown += ev.data.text;
+          frame ||= requestAnimationFrame(() => { frame = 0; renderAnswer(body, markdown, false); });
+        } else if (ev.name === "done") done = ev.data;
+        else if (ev.name === "error") fail(ev.data.error);
+      }
+      if (!done && !error) fail("The answer stream ended unexpectedly.");
+    }
   } catch {
-    reply.className = "msg error";
-    reply.textContent = "Cannot reach the backend. Is it running?";
+    fail("Cannot reach the backend. Is it running?");
   } finally {
+    clearInterval(ticker);
+    cancelAnimationFrame(frame);
+    const roundTrip = performance.now() - started;
+    if (error) {
+      reply.className = "msg error";
+      body.textContent = error; // a withdrawn answer is not shown, even partially
+      statsLine(stats, [`Round trip ${seconds(roundTrip)}`], traceId);
+    } else {
+      reply.className = "msg";
+      await renderAnswer(body, markdown, true);
+      statsLine(stats, [
+        `First token ${seconds(done.firstTokenMs)}`,
+        `Server ${seconds(done.totalMs)}`,
+        `Round trip ${seconds(roundTrip)}`,
+        ...(done.inputTokens != null ? [`Tokens ${done.inputTokens} in / ${done.outputTokens} out`] : []),
+      ], done.traceId || traceId);
+    }
     $("send").disabled = false;
     $("question").focus();
   }

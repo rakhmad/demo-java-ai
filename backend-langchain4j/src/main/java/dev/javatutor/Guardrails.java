@@ -1,11 +1,8 @@
 package dev.javatutor;
 
-import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.guardrail.InputGuardrail;
 import dev.langchain4j.guardrail.InputGuardrailResult;
-import dev.langchain4j.guardrail.OutputGuardrail;
-import dev.langchain4j.guardrail.OutputGuardrailResult;
 import jakarta.enterprise.context.ApplicationScoped;
 
 public final class Guardrails {
@@ -21,16 +18,6 @@ public final class Guardrails {
         }
     }
 
-    /** Runs after the model answers: non-Java code makes the model try again (up to the configured max retries). */
-    @ApplicationScoped
-    public static class JavaOnlyAnswerGuard implements OutputGuardrail {
-        @Override
-        public OutputGuardrailResult validate(AiMessage message) {
-            return Policy.checkAnswer(message.text())
-                    .map(lang -> reprompt("Answer contained a '" + lang + "' code block.",
-                            "Rewrite your answer. Code blocks may only be java, mermaid, svg or console. Do not include any "
-                                    + lang + " code."))
-                    .orElseGet(this::success);
-        }
-    }
+    // The answer policy is applied per chunk by AnswerStream, not as an @OutputGuardrails annotation:
+    // annotation output guardrails need the complete response, which would buffer the stream.
 }

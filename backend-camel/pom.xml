@@ -52,6 +52,10 @@
       <groupId>org.apache.camel.quarkus</groupId>
       <artifactId>camel-quarkus-direct</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.apache.camel.quarkus</groupId>
+      <artifactId>camel-quarkus-opentelemetry2</artifactId>
+    </dependency>
   </dependencies>
 
   <build>
