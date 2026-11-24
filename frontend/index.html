@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Java Tutor</title>
+<link id="code-theme" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --border: #dde1e7;
+    --accent: #c4501a; --accent-text: #ffffff; --error-bg: #fdecea; --error: #a3261b; --user: #eef3fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151b; --panel: #1a1e26; --text: #e3e7ee; --muted: #9aa3b2; --border: #2c323d;
+      --accent: #f08a4b; --accent-text: #1a1e26; --error-bg: #3a1d1b; --error: #ff9c8f; --user: #1f2735;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+           padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 1; }
+  header h1 { margin: 0; font-size: 1.15rem; }
+  header h1 span { color: var(--accent); }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; font-size: .875rem; color: var(--muted); }
+  select, textarea, button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  select { padding: 4px 8px; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px 16px 200px; }
+  .notice { color: var(--muted); font-size: .875rem; margin: 0 0 16px; }
+  .msg { border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; margin: 0 0 16px; background: var(--panel); overflow-wrap: anywhere; }
+  .msg.user { background: var(--user); white-space: pre-wrap; }
+  .msg.error { background: var(--error-bg); color: var(--error); border-color: transparent; }
+  .msg.pending { color: var(--muted); font-style: italic; }
+  .msg pre { overflow-x: auto; border-radius: 8px; }
+  .msg pre code.hljs { padding: 12px; font-size: .875rem; }
+  .msg :not(pre) > code { background: var(--user); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
+  .figure { margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; overflow-x: auto; text-align: center; }
+  .figure svg { max-width: 100%; height: auto; }
+  form { position: fixed; bottom: 0; left: 0; right: 0; background: var(--bg); border-top: 1px solid var(--border); padding: 12px 16px; }
+  .composer { max-width: 860px; margin: 0 auto; display: flex; gap: 8px; }
+  textarea { flex: 1; min-height: 64px; max-height: 40vh; padding: 10px 12px; resize: vertical; }
+  button { padding: 0 20px; background: var(--accent); color: var(--accent-text); border: none; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  #hint { max-width: 860px; margin: 6px auto 0; font-size: .8rem; color: var(--error); min-height: 1.2em; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>&#9749;</span> Java Tutor</h1>
+  <div class="controls">
+    <label>Backend
+      <select id="backend">
+        <option value="http://localhost:8080">Quarkus + LangChain4j (8080)</option>
+        <option value="http://localhost:8081">Quarkus + Camel (8081)</option>
+      </select>
+    </label>
+    <label>Code colors
+      <select id="theme">
+        <option value="github-dark">GitHub Dark</option>
+        <option value="github">GitHub Light</option>
+        <option value="atom-one-dark">Atom One Dark</option>
+        <option value="monokai">Monokai</option>
+        <option value="nord">Nord</option>
+        <option value="intellij-light">IntelliJ Light</option>
+      </select>
+    </label>
+  </div>
+</header>
+
+<main id="chat">
+  <p class="notice">Ask about Java or computer-science concepts, in English. Code answers are Java only.
+    Do not enter personal data: questions containing emails, phone numbers, names, addresses or ID/card numbers are blocked.</p>
+</main>
+
+<form id="ask">
+  <div class="composer">
+    <textarea id="question" placeholder="e.g. How does a HashMap handle collisions? Show a diagram." maxlength="4000" required></textarea>
+    <button id="send">Ask</button>
+  </div>
+  <div id="hint" role="status"></div>
+</form>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+
+const $ = (id) => document.getElementById(id);
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "default" });
+
+// ---- preferences ----
+for (const [id, apply] of [["backend", () => {}], ["theme", (v) => $("code-theme").href =
+    `https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/${v}.min.css`]]) {
+  const saved = store.get(id);
+  if (saved && [...$(id).options].some(o => o.value === saved)) $(id).value = saved;
+  apply($(id).value);
+  $(id).addEventListener("change", () => { store.set(id, $(id).value); apply($(id).value); });
+}
+
+// ---- client-side guardrails (fast feedback; the backend enforces the same rules) ----
+const PII = [
+  [/[\w.+-]+@[\w-]+(\.[\w-]+)+/, "an email address"],
+  [/(?<![\w.])\+?\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]\d{3,4}[\s.-]?\d{3,4}(?![\w.])/, "a phone number"],
+  [/\b\d{3}-\d{2}-\d{4}\b/, "an ID number"],
+  [/\b(?:\d[ -]?){12,18}\d\b/, "a card number"],
+  [/\b(my (full )?name is|my (home )?address is|i live at)\b/i, "personal details"],
+];
+function checkQuestion(q) {
+  for (const [re, what] of PII) if (re.test(q)) return `Please remove ${what}; personal data is not processed.`;
+  const prose = q.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ");
+  const letters = prose.match(/\p{L}/gu) || [];
+  const latin = prose.match(/\p{Script=Latin}/gu) || [];
+  if (letters.length && latin.length < letters.length * 0.9) return "Only English is supported.";
+  return null;
+}
+
+// ---- rendering: markdown + highlighted Java + Mermaid + sanitized SVG ----
+const escapeHtml = (s) => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const renderer = new marked.Renderer();
+renderer.code = (code, lang = "") => {
+  lang = (lang || "").trim().toLowerCase();
+  if (lang === "mermaid") return `<div class="figure"><pre class="mermaid">${escapeHtml(code)}</pre></div>`;
+  if (lang === "svg") return `<div class="figure">${code}</div>`; // sanitized below with the rest of the HTML
+  const language = hljs.getLanguage(lang) ? lang : "plaintext";
+  return `<pre><code class="hljs language-${language}">${hljs.highlight(code, { language }).value}</code></pre>`;
+};
+marked.use({ renderer, gfm: true });
+
+async function renderAnswer(el, markdown) {
+  // Model output is untrusted: strip scripts, event handlers and foreignObject from HTML and SVG alike.
+  el.innerHTML = DOMPurify.sanitize(marked.parse(markdown), {
+    USE_PROFILES: { html: true, svg: true, svgFilters: true }, FORBID_TAGS: ["foreignObject", "style"] });
+  const diagrams = el.querySelectorAll("pre.mermaid");
+  try { if (diagrams.length) await mermaid.run({ nodes: diagrams }); }
+  catch { diagrams.forEach(d => { if (!d.querySelector("svg")) d.outerHTML =
+    `<pre><code class="hljs">${escapeHtml(d.textContent)}</code></pre>`; }); } // show source if the diagram is invalid
+}
+
+function addMessage(cls, text) {
+  const div = document.createElement("div");
+  div.className = `msg ${cls}`;
+  div.textContent = text;
+  $("chat").append(div);
+  div.scrollIntoView({ behavior: "smooth", block: "end" });
+  return div;
+}
+
+$("question").addEventListener("input", () => { $("hint").textContent = checkQuestion($("question").value) || ""; });
+$("question").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("ask").requestSubmit();
+});
+
+$("ask").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const question = $("question").value.trim();
+  const problem = checkQuestion(question);
+  if (problem) { $("hint").textContent = problem; return; }
+  $("hint").textContent = "";
+  addMessage("user", question);
+  $("question").value = "";
+  $("send").disabled = true;
+  const reply = addMessage("pending", "Thinking...");
+  try {
+    const res = await fetch(`${$("backend").value}/api/ask`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { reply.className = "msg error"; reply.textContent = data.error || `Request failed (HTTP ${res.status}).`; return; }
+    reply.className = "msg";
+    await renderAnswer(reply, data.answer);
+  } catch {
+    reply.className = "msg error";
+    reply.textContent = "Cannot reach the backend. Is it running?";
+  } finally {
+    $("send").disabled = false;
+    $("question").focus();
+  }
+});
+</script>
+</body>
+</html>
